@@ -267,7 +267,10 @@ pyi_get_temp_path(char *buffer, char *runtime_tmpdir)
     wchar_t prefix[16];
     wchar_t wchar_buffer[PATH_MAX];
     char *original_tmpdir;
-    char runtime_tmpdir_abspath[PATH_MAX + 1];
+    wchar_t *wruntime_tmpdir;
+    wchar_t wruntime_tmpdir_expanded[PATH_MAX];
+    wchar_t *wruntime_tmpdir_abspath;
+    DWORD rc;
 
     if (runtime_tmpdir != NULL) {
       /*
@@ -278,8 +281,56 @@ pyi_get_temp_path(char *buffer, char *runtime_tmpdir)
       /*
        * Set TMP to runtime_tmpdir for _wtempnam() later
        */
-      pyi_path_fullpath(runtime_tmpdir_abspath, PATH_MAX, runtime_tmpdir);
-      pyi_setenv("TMP", runtime_tmpdir_abspath);
+      // Expand environment variables like %LOCALAPPDATA%
+      wruntime_tmpdir = pyi_win32_utils_from_utf8(NULL, runtime_tmpdir, 0);
+      if (!wruntime_tmpdir) {
+          return 0;
+      }
+      rc = ExpandEnvironmentStringsW(wruntime_tmpdir, wruntime_tmpdir_expanded, PATH_MAX);
+      free(wruntime_tmpdir);
+      if (!rc) {
+        return rc;
+      }
+      // Get the absolute path
+      wruntime_tmpdir_abspath = _wfullpath(NULL, wruntime_tmpdir_expanded, PATH_MAX);
+      if (!wruntime_tmpdir_abspath) {
+        return 0;
+      }
+      VS("LOADER: absolute runtime tmpdir is %ls\n", wruntime_tmpdir_abspath);
+      // Create the directory path if it does not yet already exist (e.g. %AppData%\NewFolder\NestedFolder)
+      wchar_t *cursor;
+      wchar_t path_builder[PATH_MAX];
+      ZeroMemory(path_builder, PATH_MAX * sizeof(wchar_t));
+      cursor = wcschr(wruntime_tmpdir_abspath, L'\\');
+      while(cursor != NULL) {
+        wcsncpy(path_builder, wruntime_tmpdir_abspath, cursor - wruntime_tmpdir_abspath + 1);
+        if(!CreateDirectoryW(path_builder, NULL)) {
+          rc = GetLastError();
+          if(rc != ERROR_ALREADY_EXISTS) {
+              return 0;
+          }
+        }
+        else {
+           VS("LOADER: created directory %ls\n", path_builder);
+        }
+        cursor = wcschr(++cursor, L'\\');
+      }
+      // May not have a string terminated with \, so run CreateDirectoryW one last time to handle that case
+      if (!CreateDirectoryW(wruntime_tmpdir_abspath, NULL)) {
+          rc = GetLastError();
+          if(rc != ERROR_ALREADY_EXISTS) {
+              return 0;
+          }
+      }
+      else {
+        VS("LOADER: created directory %ls\n", wruntime_tmpdir_abspath);
+      }
+      // Store in the TMP environment variable
+      rc = _wputenv_s(L"TMP", wruntime_tmpdir_abspath);
+      free(wruntime_tmpdir_abspath);
+      if (rc) {
+        return 0;
+      }
     }
 
     GetTempPathW(PATH_MAX, wchar_buffer);
